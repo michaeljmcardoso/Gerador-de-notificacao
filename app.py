@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import sqlite3
+from collections import Counter
+from contextlib import closing
 
 import streamlit as st
 from docx import Document
@@ -10,9 +13,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
-PROCESS_NUMBER = "54230.006073/2006-24"
 NOTIFICATION_NUMBER = "00000000/2026/SR(12)MA-Q1/SR(12)MA-Q/SR(12)MA/INCRA-INCRA"
-TERRITORY = "Bom Jesus/Santa Maria dos Moreiras/Jerusalém"
 INCIDENCE_OPTIONS = (
     "Incide parcialmente",
     "Incide totalmente",
@@ -24,7 +25,16 @@ INCIDENCE_TEXT = {
     "É confrontante": "é confrontante ao",
 }
 LOGO_PATH = Path(__file__).parent / "assets" / "brasao.jpg"
+DATABASE_PATH = Path(__file__).parent / "data" / "processos_notificacao.db"
 DOCUMENT_LANGUAGE = "pt-BR"
+
+
+@dataclass(frozen=True)
+class ProcessRecord:
+    record_id: int
+    process_number: str
+    community: str
+    municipality: str
 
 
 @dataclass
@@ -36,6 +46,49 @@ class NotificationData:
     address: str
     body_code: str
     incidence: str
+    process_number: str
+    community: str
+    municipality: str
+
+
+@st.cache_data
+def load_process_records(database_path: str = str(DATABASE_PATH)) -> tuple[ProcessRecord, ...]:
+    path = Path(database_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Não foi encontrado o cadastro de processos: {path}")
+
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        rows = connection.execute(
+            """
+            SELECT ID, Numero, Comunidade, Municipio
+            FROM processos
+            WHERE trim(coalesce(Numero, '')) <> ''
+              AND trim(coalesce(Comunidade, '')) <> ''
+              AND trim(coalesce(Municipio, '')) <> ''
+            ORDER BY ID
+            """
+        ).fetchall()
+
+    if not rows:
+        raise ValueError("O cadastro não contém processos com comunidade e município.")
+    return tuple(ProcessRecord(*row) for row in rows)
+
+
+def format_process_record(
+    record: ProcessRecord,
+    community_counts: Counter,
+    community_municipality_counts: Counter,
+    option_label_counts: Counter,
+) -> str:
+    label = record.community
+    if community_counts[record.community] > 1:
+        label += f" — {record.municipality}"
+        if community_municipality_counts[(record.community, record.municipality)] > 1:
+            label += f" — Processo {record.process_number}"
+    if option_label_counts[label] > 1:
+        label += f" — Registro {record.record_id}"
+    return label
 
 
 def _set_run_language(run):
@@ -125,7 +178,7 @@ def build_notification_docx(data: NotificationData) -> bytes:
         f"Matrícula {data.registry}",
     ]
     if data.header_code:
-        recipient_lines.append(f"Código do Imóvel {data.header_code}")
+        recipient_lines.append(f"Código do Imóvel SNCR {data.header_code}")
     recipient_lines.append(data.address)
     for text in recipient_lines:
         paragraph = document.add_paragraph()
@@ -139,7 +192,7 @@ def build_notification_docx(data: NotificationData) -> bytes:
     subject.add_run("Assunto: ")
     run = subject.add_run(
         "Notificação sobre publicação do Relatório Técnico de Identificação e "
-        f"Delimitação - RTID - do território quilombola {TERRITORY}"
+        f"Delimitação - RTID - do território quilombola {data.community}"
     )
     _set_font(run, bold=True)
 
@@ -147,7 +200,7 @@ def build_notification_docx(data: NotificationData) -> bytes:
     reference.paragraph_format.space_after = Pt(16)
     reference.add_run(
         "Referência: Caso responda este Ofício, indicar expressamente o "
-        f"Processo nº {PROCESS_NUMBER}."
+        f"Processo nº {data.process_number}."
     )
 
     greeting = document.add_paragraph()
@@ -162,23 +215,24 @@ def build_notification_docx(data: NotificationData) -> bytes:
         "fundamento no art. 68 do Ato das Disposições Constitucionais Transitórias "
         "da Constituição Federal de 1988, no Decreto n.º 4.887/2003 e na Instrução "
         "Normativa INCRA n.º 57/2009, que tramita nesta Superintendência o Processo "
-        f"Administrativo n.º {PROCESS_NUMBER}, que trata da regularização fundiária "
-        "das terras das Comunidades Remanescentes de Quilombo "
-        f"{TERRITORY}, localizadas no Município de Codó, Estado do Maranhão.",
+        f"Administrativo n.º {data.process_number}, que trata da regularização "
+        "fundiária das terras da Comunidade Remanescente de Quilombo "
+        f"{data.community}, localizada no Município de {data.municipality}, "
+        "Estado do Maranhão.",
     )
 
     relation = INCIDENCE_TEXT[data.incidence]
     incidence_clause = (
-        f"{relation} território quilombola de {TERRITORY}"
+        f"{relation} território quilombola de {data.community}"
         if data.incidence == "É confrontante"
-        else f"{relation} do território quilombola de {TERRITORY}"
+        else f"{relation} do território quilombola de {data.community}"
     )
     body_code_text = f", código {data.body_code}" if data.body_code else ""
     _add_body_paragraph(
         document,
         "Em cumprimento ao estabelecido no citado Decreto e na Instrução Normativa, "
         "foi elaborado o Relatório Técnico de Identificação e Delimitação – RTID – "
-        "do território das referidas Comunidades, cujo extrato foi publicado por "
+        "do território da referida Comunidade, cujo extrato foi publicado por "
         "meio de edital no Diário Oficial da União (conforme cópia anexa). Foi "
         f"constatado que o imóvel rural denominado {data.property_name}"
         f"{body_code_text}, matrícula n.º {data.registry}, que se encontra sob sua "
@@ -197,7 +251,7 @@ def build_notification_docx(data: NotificationData) -> bytes:
     _add_body_paragraph(
         document,
         "Informa ainda que o Processo Administrativo n.º "
-        f"{PROCESS_NUMBER}, em cujos autos se processa o feito, estará à sua "
+        f"{data.process_number}, em cujos autos se processa o feito, estará à sua "
         "disposição para consulta na sede desta Superintendência, situada na Rua H, "
         "Quadra E, Lote 01, n.º 12 – Bairro Turu – São Luís/MA, de segunda a "
         "sexta-feira, durante o expediente das 8h às 12h e das 14h às 18h, ou pelos "
@@ -226,7 +280,7 @@ def build_notification_docx(data: NotificationData) -> bytes:
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     footer.add_run("Minuta de Notificação 00000000     SEI ")
-    footer.add_run(f"{PROCESS_NUMBER} / pg. ")
+    footer.add_run(f"{data.process_number} / pg. ")
     _add_page_number(footer)
 
     for paragraph in (
@@ -245,22 +299,65 @@ def build_notification_docx(data: NotificationData) -> bytes:
 st.set_page_config(page_title="Gerador de Minuta de Notificação", page_icon="📄")
 st.title("Gerador de Minuta de Notificação")
 st.write(
-    "Preencha os dados do representante e do imóvel. Os textos institucionais "
-    "seguem o modelo de notificação padrão."
+    "Selecione a comunidade para preencher automaticamente o processo e o município. "
+    "Depois, informe os dados do representante e do imóvel."
 )
+
+try:
+    process_records = load_process_records()
+except (FileNotFoundError, sqlite3.Error, ValueError) as error:
+    st.error(f"Não foi possível carregar o cadastro de comunidades: {error}")
+    st.stop()
+
+community_counts = Counter(record.community for record in process_records)
+community_municipality_counts = Counter(
+    (record.community, record.municipality) for record in process_records
+)
+process_records_by_id = {record.record_id: record for record in process_records}
+option_label_counts = Counter(
+    format_process_record(
+        record,
+        community_counts,
+        community_municipality_counts,
+        Counter(),
+    )
+    for record in process_records
+)
+
+selected_record_id = st.selectbox(
+    "Comunidade quilombola",
+    options=tuple(process_records_by_id),
+    index=None,
+    placeholder="Digite ou selecione uma comunidade",
+    format_func=lambda record_id: format_process_record(
+        process_records_by_id[record_id],
+        community_counts,
+        community_municipality_counts,
+        option_label_counts,
+    ),
+)
+selected_record = (
+    process_records_by_id[selected_record_id]
+    if selected_record_id is not None
+    else None
+)
+if selected_record is not None:
+    st.caption(
+        f"Processo: {selected_record.process_number} · "
+        f"Município: {selected_record.municipality}"
+    )
 
 with st.form("notification_form"):
     st.subheader("Destinatário e imóvel")
     representative = st.text_input("Nome do representante/titular *")
     property_name = st.text_input("Nome do imóvel *")
     registry = st.text_input("Matrícula do imóvel *")
-    header_code = st.text_input("Código do imóvel no cabeçalho (opcional)")
+    header_code = st.text_input("Código do imóvel (SNCR ou CCIR) no cabeçalho (opcional)")
     address = st.text_area("Endereço *", height=90)
 
     st.subheader("Informações do território")
     st.caption(
-        "O código no parágrafo é independente do código do cabeçalho, como no "
-        "modelo fornecido."
+        "Código SNCR ou CCIR"
     )
     body_code = st.text_input("Código do imóvel no segundo parágrafo (opcional)")
     incidence = st.selectbox("Relação com o território quilombola", INCIDENCE_OPTIONS)
@@ -268,6 +365,7 @@ with st.form("notification_form"):
 
 if submitted:
     required_fields = {
+        "Comunidade quilombola": selected_record.community if selected_record else "",
         "Nome do representante/titular": representative,
         "Nome do imóvel": property_name,
         "Matrícula do imóvel": registry,
@@ -285,6 +383,9 @@ if submitted:
             address=address.strip(),
             body_code=body_code.strip(),
             incidence=incidence,
+            process_number=selected_record.process_number,
+            community=selected_record.community,
+            municipality=selected_record.municipality,
         )
         document_bytes = build_notification_docx(data)
         st.success("Minuta gerada.")

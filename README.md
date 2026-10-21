@@ -3,6 +3,15 @@
 Aplicação Streamlit para preencher os dados do destinatário e do imóvel e gerar
 uma minuta de notificação em DOCX, seguindo o modelo fornecido.
 
+O formulário utiliza `data/processos_notificacao.db`, um cadastro derivado da
+tabela `processos` que preserva os 445 registros e seus IDs, incluindo
+duplicatas, e contém somente os dados necessários: número do processo,
+comunidade e município. O seletor começa vazio e permite digitar para localizar
+uma comunidade ou escolher uma opção. Ao selecionar um registro, o processo e o
+município correspondentes são exibidos imediatamente. Comunidades com nomes
+repetidos são identificadas também pelo município e, quando necessário, pelo
+processo e pelo ID do registro.
+
 ## Executar
 
 ```bash

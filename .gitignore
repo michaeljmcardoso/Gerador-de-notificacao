@@ -1,2 +1,6 @@
 /Minuta_de_Notificacao-modelo.pdf
 /gerador-de-notificacao
+__pycache__/
+*.py[cod]
+.venv/
+tests/
